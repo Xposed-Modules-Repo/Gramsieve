@@ -1,0 +1,491 @@
+package com.tianqianguai.gramsieve.ui;
+
+import android.content.Intent;
+import android.os.Bundle;
+import android.text.InputType;
+import android.util.TypedValue;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
+
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.google.android.material.materialswitch.MaterialSwitch;
+import com.google.android.material.textfield.TextInputEditText;
+import com.google.android.material.textfield.TextInputLayout;
+import com.tianqianguai.gramsieve.R;
+import com.tianqianguai.gramsieve.config.AppLocaleManager;
+import com.tianqianguai.gramsieve.config.ModuleConfigStore;
+import com.tianqianguai.gramsieve.core.FilterConfig;
+import com.tianqianguai.gramsieve.core.RuleDraftMatrix;
+
+import java.util.EnumMap;
+import java.util.List;
+import java.util.Map;
+
+public final class ConfigDialogActivity extends AppCompatActivity {
+    public static final String EXTRA_MODE = "mode";
+    public static final String EXTRA_DIALOG_ID = "dialog_id";
+    public static final String EXTRA_DIALOG_TITLE = "dialog_title";
+    public static final String MODE_GLOBAL = "global";
+    public static final String MODE_CHAT = "chat";
+
+    private static final FilterConfig.RuleTarget[] EDITOR_TARGETS = new FilterConfig.RuleTarget[]{
+            FilterConfig.RuleTarget.ANY,
+            FilterConfig.RuleTarget.TEXT,
+            FilterConfig.RuleTarget.CAPTION,
+            FilterConfig.RuleTarget.BUTTONS,
+            FilterConfig.RuleTarget.SENDER,
+            FilterConfig.RuleTarget.CHAT
+    };
+
+    private AlertDialog dialog;
+    private boolean relaunchAfterDismiss;
+
+    private static final class TargetFieldGroup {
+        final TextInputEditText keywordInput;
+        final TextInputEditText regexInput;
+
+        TargetFieldGroup(TextInputEditText keywordInput, TextInputEditText regexInput) {
+            this.keywordInput = keywordInput;
+            this.regexInput = regexInput;
+        }
+    }
+
+    private static final class RuleMatrixInputs {
+        final Map<FilterConfig.RuleTarget, TargetFieldGroup> fields =
+                new EnumMap<>(FilterConfig.RuleTarget.class);
+
+        void put(FilterConfig.RuleTarget target, TargetFieldGroup group) {
+            fields.put(target, group);
+        }
+
+        List<FilterConfig.RuleSpec> toRules() {
+            RuleDraftMatrix matrix = new RuleDraftMatrix();
+            for (FilterConfig.RuleTarget target : EDITOR_TARGETS) {
+                TargetFieldGroup group = fields.get(target);
+                if (group == null) {
+                    continue;
+                }
+                matrix.set(target, FilterConfig.RuleMode.KEYWORD, valueOf(group.keywordInput));
+                matrix.set(target, FilterConfig.RuleMode.REGEX, valueOf(group.regexInput));
+            }
+            return matrix.toRules();
+        }
+    }
+
+    public ConfigDialogActivity() {
+    }
+
+    @Override
+    protected void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        showEditor();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (isFinishing() && dialog != null) {
+            dialog.dismiss();
+            dialog = null;
+        }
+    }
+
+    private void showEditor() {
+        String mode = getIntent().getStringExtra(EXTRA_MODE);
+        boolean chatMode = MODE_CHAT.equals(mode);
+        long dialogId = getIntent().getLongExtra(EXTRA_DIALOG_ID, Long.MIN_VALUE);
+        if (chatMode && dialogId == Long.MIN_VALUE) {
+            finish();
+            return;
+        }
+
+        FilterConfig config = ModuleConfigStore.load(this);
+        FilterConfig.ChatRuleSet chatRuleSet = chatMode
+                ? config.getOrCreateChatRuleSet(dialogId).deepCopy()
+                : null;
+
+        RuleDraftMatrix matchMatrix = RuleDraftMatrix.fromRules(chatMode ? chatRuleSet.rules : config.globalRules);
+        RuleDraftMatrix exclusionMatrix = RuleDraftMatrix.fromRules(chatMode ? chatRuleSet.exclusions : config.globalExclusions);
+
+        int padding = dp(20);
+        ScrollView scrollView = new ScrollView(this);
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setPadding(padding, padding / 2, padding, padding);
+        scrollView.addView(
+                container,
+                new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        );
+
+        MaterialSwitch enabledSwitch = addSwitch(container, getString(R.string.dialog_enabled));
+        enabledSwitch.setChecked(chatMode ? chatRuleSet.enabled : config.enabled);
+
+        MaterialSwitch debugLoggingSwitch = null;
+        MaterialSwitch excludeChatSwitch = null;
+        RadioGroup languageGroup = null;
+        RadioGroup actionGroup = null;
+        int systemLanguageOptionId = View.NO_ID;
+        int englishLanguageOptionId = View.NO_ID;
+        int chineseLanguageOptionId = View.NO_ID;
+
+        if (!chatMode) {
+            addSectionLabel(container, getString(R.string.dialog_language_group));
+            languageGroup = new RadioGroup(this);
+            languageGroup.setOrientation(LinearLayout.VERTICAL);
+            RadioButton systemLanguageButton = new RadioButton(this);
+            systemLanguageOptionId = View.generateViewId();
+            systemLanguageButton.setId(systemLanguageOptionId);
+            systemLanguageButton.setText(R.string.dialog_language_system);
+            RadioButton englishLanguageButton = new RadioButton(this);
+            englishLanguageOptionId = View.generateViewId();
+            englishLanguageButton.setId(englishLanguageOptionId);
+            englishLanguageButton.setText(R.string.dialog_language_english);
+            RadioButton chineseLanguageButton = new RadioButton(this);
+            chineseLanguageOptionId = View.generateViewId();
+            chineseLanguageButton.setId(chineseLanguageOptionId);
+            chineseLanguageButton.setText(R.string.dialog_language_simplified_chinese);
+            languageGroup.addView(systemLanguageButton);
+            languageGroup.addView(englishLanguageButton);
+            languageGroup.addView(chineseLanguageButton);
+            String selectedLanguageTag = FilterConfig.normalizeAppLanguageTag(config.appLanguageTag);
+            if (FilterConfig.APP_LANGUAGE_ENGLISH.equals(selectedLanguageTag)) {
+                languageGroup.check(englishLanguageOptionId);
+            } else if (FilterConfig.APP_LANGUAGE_SIMPLIFIED_CHINESE.equals(selectedLanguageTag)) {
+                languageGroup.check(chineseLanguageOptionId);
+            } else {
+                languageGroup.check(systemLanguageOptionId);
+            }
+            addGroup(container, languageGroup);
+
+            debugLoggingSwitch = addSwitch(container, getString(R.string.dialog_debug_logging));
+            debugLoggingSwitch.setChecked(config.debugLogging);
+
+            addSectionLabel(container, getString(R.string.dialog_action_group));
+            actionGroup = new RadioGroup(this);
+            actionGroup.setOrientation(LinearLayout.VERTICAL);
+            RadioButton hideButton = new RadioButton(this);
+            hideButton.setText(R.string.dialog_action_hide);
+            hideButton.setId(android.R.id.button1);
+            RadioButton collapseButton = new RadioButton(this);
+            collapseButton.setText(R.string.dialog_action_collapse);
+            collapseButton.setId(android.R.id.button3);
+            RadioButton debugButton = new RadioButton(this);
+            debugButton.setText(R.string.dialog_action_mark);
+            debugButton.setId(android.R.id.button2);
+            actionGroup.addView(hideButton);
+            actionGroup.addView(collapseButton);
+            actionGroup.addView(debugButton);
+            if (config.action == FilterConfig.Action.DEBUG_MARK) {
+                actionGroup.check(debugButton.getId());
+            } else if (config.action == FilterConfig.Action.COLLAPSE) {
+                actionGroup.check(collapseButton.getId());
+            } else {
+                actionGroup.check(hideButton.getId());
+            }
+            addGroup(container, actionGroup);
+        } else {
+            excludeChatSwitch = addSwitch(container, getString(R.string.dialog_exclude_chat));
+            excludeChatSwitch.setChecked(chatRuleSet.excludeFromGlobal);
+            String chatTitle = getIntent().getStringExtra(EXTRA_DIALOG_TITLE);
+            String scopeText = chatTitle == null || chatTitle.isBlank()
+                    ? getString(R.string.dialog_scope_info_fallback, Long.toString(dialogId))
+                    : getString(R.string.dialog_scope_info, chatTitle);
+            addInfo(container, scopeText);
+        }
+
+        addSectionLabel(container, getString(R.string.dialog_rule_guide_title));
+        addInfo(container, getString(chatMode ? R.string.dialog_rule_guide_chat : R.string.dialog_rule_guide_global));
+
+        addSectionLabel(container, getString(R.string.dialog_match_section_title));
+        addInfo(container, getString(R.string.dialog_match_section_hint));
+        RuleMatrixInputs matchInputs = addRuleMatrixSection(container, matchMatrix, chatMode);
+
+        addSectionLabel(container, getString(R.string.dialog_keep_section_title));
+        addInfo(container, getString(R.string.dialog_keep_section_hint));
+        RuleMatrixInputs exclusionInputs = addRuleMatrixSection(container, exclusionMatrix, chatMode);
+
+        MaterialAlertDialogBuilder builder = new MaterialAlertDialogBuilder(this)
+                .setTitle(chatMode ? R.string.dialog_title_chat : R.string.dialog_title_global)
+                .setView(scrollView)
+                .setNegativeButton(R.string.dialog_cancel, (d, which) -> finish())
+                .setPositiveButton(R.string.dialog_save, null)
+                .setOnDismissListener(d -> {
+                    dialog = null;
+                    if (relaunchAfterDismiss) {
+                        relaunchAfterDismiss = false;
+                        startActivity(new Intent(getIntent()));
+                    }
+                    finish();
+                });
+
+        final MaterialSwitch debugLoggingSwitchFinal = debugLoggingSwitch;
+        final MaterialSwitch excludeChatSwitchFinal = excludeChatSwitch;
+        final RadioGroup languageGroupFinal = languageGroup;
+        final RadioGroup actionGroupFinal = actionGroup;
+        final int englishLanguageOptionIdFinal = englishLanguageOptionId;
+        final int chineseLanguageOptionIdFinal = chineseLanguageOptionId;
+        dialog = builder.create();
+        dialog.setOnShowListener(dialogInterface -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            FilterConfig latest = ModuleConfigStore.load(this);
+            String previousLanguageTag = FilterConfig.normalizeAppLanguageTag(latest.appLanguageTag);
+            if (chatMode) {
+                FilterConfig.ChatRuleSet updatedChat = latest.getOrCreateChatRuleSet(dialogId);
+                updatedChat.enabled = enabledSwitch.isChecked();
+                updatedChat.excludeFromGlobal = excludeChatSwitchFinal != null && excludeChatSwitchFinal.isChecked();
+                updatedChat.rules = matchInputs.toRules();
+                updatedChat.exclusions = exclusionInputs.toRules();
+                updatedChat.sanitize();
+                if (updatedChat.isSemanticallyEmpty()) {
+                    latest.chatRules.remove(FilterConfig.chatKey(dialogId));
+                }
+            } else {
+                latest.enabled = enabledSwitch.isChecked();
+                latest.debugLogging = debugLoggingSwitchFinal != null && debugLoggingSwitchFinal.isChecked();
+                int checkedLanguageId = languageGroupFinal == null ? View.NO_ID : languageGroupFinal.getCheckedRadioButtonId();
+                latest.appLanguageTag = selectedLanguageTag(
+                        checkedLanguageId,
+                        englishLanguageOptionIdFinal,
+                        chineseLanguageOptionIdFinal
+                );
+                int checkedId = actionGroupFinal == null ? android.R.id.button1 : actionGroupFinal.getCheckedRadioButtonId();
+                if (checkedId == android.R.id.button2) {
+                    latest.action = FilterConfig.Action.DEBUG_MARK;
+                } else if (checkedId == android.R.id.button3) {
+                    latest.action = FilterConfig.Action.COLLAPSE;
+                } else {
+                    latest.action = FilterConfig.Action.HIDE;
+                }
+                latest.globalRules = matchInputs.toRules();
+                latest.globalExclusions = exclusionInputs.toRules();
+            }
+            latest.sanitize();
+            ModuleConfigStore.save(this, latest);
+            if (!chatMode && !previousLanguageTag.equals(latest.appLanguageTag)) {
+                AppLocaleManager.apply(this, latest.appLanguageTag);
+                relaunchAfterDismiss = true;
+            }
+            Toast.makeText(this, R.string.dialog_saved_toast, Toast.LENGTH_SHORT).show();
+            dialog.dismiss();
+        }));
+        dialog.show();
+    }
+
+    private RuleMatrixInputs addRuleMatrixSection(LinearLayout container, RuleDraftMatrix matrix, boolean chatMode) {
+        RuleMatrixInputs inputs = new RuleMatrixInputs();
+        for (FilterConfig.RuleTarget target : EDITOR_TARGETS) {
+            addTargetRuleGroup(container, inputs, matrix, target, chatMode);
+        }
+        return inputs;
+    }
+
+    private void addTargetRuleGroup(
+            LinearLayout container,
+            RuleMatrixInputs inputs,
+            RuleDraftMatrix matrix,
+            FilterConfig.RuleTarget target,
+            boolean chatMode
+    ) {
+        addTargetLabel(container, targetLabel(target));
+        addInfo(container, targetHint(target, chatMode));
+
+        TextInputEditText keywordInput = addMultilineInput(
+                container,
+                getString(R.string.dialog_input_label_keywords, targetLabel(target)),
+                keywordHint(target, chatMode),
+                matrix.get(target, FilterConfig.RuleMode.KEYWORD),
+                1,
+                4
+        );
+        TextInputEditText regexInput = addMultilineInput(
+                container,
+                getString(R.string.dialog_input_label_regex, targetLabel(target)),
+                regexHint(target, chatMode),
+                matrix.get(target, FilterConfig.RuleMode.REGEX),
+                1,
+                4
+        );
+        inputs.put(target, new TargetFieldGroup(keywordInput, regexInput));
+    }
+
+    private MaterialSwitch addSwitch(LinearLayout container, String text) {
+        MaterialSwitch toggle = new MaterialSwitch(this);
+        toggle.setText(text);
+        toggle.setShowText(false);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.bottomMargin = dp(6);
+        container.addView(toggle, params);
+        return toggle;
+    }
+
+    private void addGroup(LinearLayout container, RadioGroup group) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.bottomMargin = dp(8);
+        container.addView(group, params);
+    }
+
+    private TextView addSectionLabel(LinearLayout container, String text) {
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.topMargin = dp(10);
+        params.bottomMargin = dp(4);
+        container.addView(label, params);
+        return label;
+    }
+
+    private TextView addTargetLabel(LinearLayout container, String text) {
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.topMargin = dp(12);
+        params.bottomMargin = dp(2);
+        container.addView(label, params);
+        return label;
+    }
+
+    private void addInfo(LinearLayout container, String text) {
+        TextView info = new TextView(this);
+        info.setText(text);
+        info.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.bottomMargin = dp(6);
+        container.addView(info, params);
+    }
+
+    private TextInputEditText addMultilineInput(
+            LinearLayout container,
+            String title,
+            String hint,
+            String initialValue,
+            int minLines,
+            int maxLines
+    ) {
+        TextInputLayout layout = new TextInputLayout(this);
+        layout.setHint(title);
+        layout.setHelperText(hint);
+        TextInputEditText editText = new TextInputEditText(this);
+        editText.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        editText.setMinLines(minLines);
+        editText.setMaxLines(maxLines);
+        editText.setText(initialValue);
+        layout.addView(editText, new TextInputLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.topMargin = dp(4);
+        params.bottomMargin = dp(2);
+        container.addView(layout, params);
+        return editText;
+    }
+
+    private String targetLabel(FilterConfig.RuleTarget target) {
+        FilterConfig.RuleTarget safeTarget = target == null ? FilterConfig.RuleTarget.ANY : target;
+        switch (safeTarget) {
+            case TEXT:
+                return getString(R.string.dialog_target_label_text);
+            case CAPTION:
+                return getString(R.string.dialog_target_label_caption);
+            case BUTTONS:
+                return getString(R.string.dialog_target_label_button);
+            case SENDER:
+                return getString(R.string.dialog_target_label_sender);
+            case CHAT:
+                return getString(R.string.dialog_target_label_chat);
+            case ANY:
+            default:
+                return getString(R.string.dialog_target_label_any);
+        }
+    }
+
+    private String targetScope(FilterConfig.RuleTarget target) {
+        FilterConfig.RuleTarget safeTarget = target == null ? FilterConfig.RuleTarget.ANY : target;
+        switch (safeTarget) {
+            case TEXT:
+                return getString(R.string.dialog_rule_target_text);
+            case CAPTION:
+                return getString(R.string.dialog_rule_target_caption);
+            case BUTTONS:
+                return getString(R.string.dialog_rule_target_button);
+            case SENDER:
+                return getString(R.string.dialog_rule_target_sender);
+            case CHAT:
+                return getString(R.string.dialog_rule_target_chat);
+            case ANY:
+            default:
+                return getString(R.string.dialog_rule_target_any);
+        }
+    }
+
+    private String targetHint(FilterConfig.RuleTarget target, boolean chatMode) {
+        String hint = getString(R.string.dialog_target_hint, targetScope(target));
+        if (chatMode && target == FilterConfig.RuleTarget.CHAT) {
+            return hint + " " + getString(R.string.dialog_rule_chat_scope_warning);
+        }
+        return hint;
+    }
+
+    private String keywordHint(FilterConfig.RuleTarget target, boolean chatMode) {
+        String hint = getString(R.string.dialog_input_hint_keywords, targetScope(target));
+        if (chatMode && target == FilterConfig.RuleTarget.CHAT) {
+            return hint + " " + getString(R.string.dialog_rule_chat_scope_warning);
+        }
+        return hint;
+    }
+
+    private String regexHint(FilterConfig.RuleTarget target, boolean chatMode) {
+        String hint = getString(R.string.dialog_input_hint_regex, targetScope(target));
+        if (chatMode && target == FilterConfig.RuleTarget.CHAT) {
+            return hint + " " + getString(R.string.dialog_rule_chat_scope_warning);
+        }
+        return hint;
+    }
+
+    private static String selectedLanguageTag(int checkedId, int englishOptionId, int chineseOptionId) {
+        if (checkedId == englishOptionId) {
+            return FilterConfig.APP_LANGUAGE_ENGLISH;
+        }
+        if (checkedId == chineseOptionId) {
+            return FilterConfig.APP_LANGUAGE_SIMPLIFIED_CHINESE;
+        }
+        return FilterConfig.APP_LANGUAGE_SYSTEM;
+    }
+
+    private static String valueOf(TextInputEditText editText) {
+        return editText.getText() == null ? "" : editText.getText().toString();
+    }
+
+    private int dp(int value) {
+        return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value, getResources().getDisplayMetrics()));
+    }
+}
